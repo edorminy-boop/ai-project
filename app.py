@@ -1,96 +1,114 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+import numpy as np
 
-# Set Page Config
-st.set_page_config(page_title="AI Bid Tab Analyzer", layout="wide")
+# Page Config
+st.set_page_config(page_title="AI Bid Analyzer", layout="wide")
 
-st.title("🏗️ AI Bid Tab Analysis Tool")
-st.markdown("Upload your consolidated bid tab Excel file to generate instant reports.")
+st.title("🏗️ AI Bid Tab Analyzer")
+st.markdown("Upload a bid comparison sheet to analyze value, variances, and discrepancies.")
 
-# --- SIDEBAR / UPLOAD ---
-with st.sidebar:
-    st.header("Upload Data")
-    uploaded_file = st.file_uploader("Choose a Bid Tab file", type=["xlsx", "csv"])
-    st.info("Ensure your file has columns: 'Bidder', 'Item Description', 'Quantity', 'Unit Price', and 'Total Price'.")
+# 1. File Upload
+uploaded_file = st.file_uploader("Upload Bid Tab (CSV or Excel)", type=["csv", "xlsx"])
 
 if uploaded_file:
-    # Load Data
-    try:
-        df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
+    # Load data
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    
+    # Identify Vendors (Assumes first 2-3 columns are Description/Qty/Unit)
+    # We identify numeric columns as potential vendor price columns
+    all_cols = df.columns.tolist()
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # Let user confirm which columns are the Vendors
+    vendors = st.multiselect("Select Vendor Columns", numeric_cols, default=numeric_cols)
+    description_col = st.selectbox("Select Line Item Description Column", all_cols, index=0)
+
+    if vendors and description_col:
+        # --- SECTION 1: BEST VALUE ANALYSIS ---
+        st.header("1. Overall Bid Summary")
         
-        # Data Cleaning: Ensure numeric types
-        df['Unit Price'] = pd.to_numeric(df['Unit Price'], errors='coerce')
-        df['Total Price'] = pd.to_numeric(df['Total Price'], errors='coerce')
+        totals = df[vendors].sum().sort_values()
+        best_vendor = totals.idxmin()
+        
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.metric("Best Value (Lowest Total)", best_vendor)
+            st.write("**Total Bid Comparison**")
+            st.dataframe(totals.rename("Total Bid Amount").map("${:,.2f}".format))
+            
+        with col2:
+            fig_total = px.bar(totals, x=totals.index, y=totals.values, 
+                               title="Total Bid Comparison", 
+                               labels={'y':'Total Cost', 'index':'Vendor'},
+                               color=totals.index)
+            st.plotly_chart(fig_total, use_container_width=True)
 
-        # --- TABS FOR THE 3 REPORTS ---
-        report1, report2, report3 = st.tabs([
-            "💰 1. Best Value Analysis", 
-            "⚠️ 2. Discrepancy Report", 
-            "📊 3. Average Cost Report"
-        ])
+        st.divider()
 
-        # --- REPORT 1: BEST VALUE BID ---
-        with report1:
-            st.header("Project Value Summary")
-            # Calculate Total Project Cost per Bidder
-            best_value = df.groupby('Bidder')['Total Price'].sum().reset_index()
-            best_value = best_value.sort_values(by='Total Price')
-            
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.metric("Lowest Bidder", best_value.iloc[0]['Bidder'])
-                st.dataframe(best_value.style.format({"Total Price": "${:,.2f}"}))
-            
-            with col2:
-                fig1 = px.bar(best_value, x='Bidder', y='Total Price', 
-                             title="Overall Cost Comparison", 
-                             color='Total Price', color_continuous_scale='Greens')
-                st.plotly_chart(fig1, use_container_width=True)
+        # --- SECTION 2: LINE ITEM VARIANCE ---
+        st.header("2. Line Item Detail & Variance")
+        
+        # Calculate Variance Data
+        detail_df = df[[description_col] + vendors].copy()
+        detail_df['Average'] = detail_df[vendors].mean(axis=1)
+        
+        # Display the table with conditional formatting
+        st.write("### Line Item Comparison Table")
+        st.dataframe(detail_df.style.highlight_min(subset=vendors, axis=1, color='lightgreen'))
 
-        # --- REPORT 2: DISCREPANCIES ---
-        with report2:
-            st.header("Line Item Variance & Discrepancies")
-            st.write("This report highlights items where bidders have significant price differences.")
-            
-            # Pivot table to see items side-by-side
-            pivot_df = df.pivot(index='Item Description', columns='Bidder', values='Unit Price')
-            
-            # Calculate Coefficient of Variation (CV) to find the most "disputed" items
-            pivot_df['Average'] = pivot_df.mean(axis=1)
-            pivot_df['Std Dev'] = pivot_df.std(axis=1)
-            pivot_df['Variance %'] = (pivot_df['Std Dev'] / pivot_df['Average']) * 100
-            
-            # Show interactive table with highlighting for high variance (>30%)
-            st.subheader("Tabulated Discrepancies")
-            st.dataframe(pivot_df.style.background_gradient(subset=['Variance %'], cmap='Reds'))
+        # Visualizing variance for a specific item
+        selected_item = st.selectbox("Drill down into specific Line Item:", df[description_col].unique())
+        item_row = detail_df[detail_df[description_col] == selected_item]
+        
+        # Plotly Variance Chart
+        item_vals = item_row[vendors].T
+        item_vals.columns = ['Price']
+        fig_var = px.bar(item_vals, x=item_vals.index, y='Price', 
+                         title=f"Price Spread for: {selected_item}",
+                         color='Price', color_continuous_scale='RdYlGn_r')
+        st.plotly_chart(fig_var, use_container_width=True)
 
-            # Graphical Report: Box Plot showing spread of unit prices
-            st.subheader("Price Distribution per Item")
-            fig2 = px.box(df, x="Item Description", y="Unit Price", color="Item Description", 
-                         title="Market Spread per Line Item")
-            st.plotly_chart(fig2, use_container_width=True)
+        st.divider()
 
-        # --- REPORT 3: AVERAGE COST PER LINE ITEM ---
-        with report3:
-            st.header("Market Average Evaluation")
-            st.write("The 'Collective Intelligence' price for every item in the scope.")
-            
-            avg_report = df.groupby('Item Description').agg({
-                'Unit Price': ['mean', 'median', 'min', 'max']
-            }).reset_index()
-            
-            # Flatten multi-index columns
-            avg_report.columns = ['Item Description', 'Avg Price', 'Median Price', 'Min Price', 'Max Price']
-            
-            st.table(avg_report.style.format({
-                "Avg Price": "${:,.2f}", "Median Price": "${:,.2f}", 
-                "Min Price": "${:,.2f}", "Max Price": "${:,.2f}"
-            }))
+        # --- SECTION 3: STATISTICAL AUDIT (THE 'AI' LOGIC) ---
+        st.header("3. Suspect Bid & Discrepancy Audit")
+        
+        audit_df = df[[description_col]].copy()
+        audit_df['Mean'] = df[vendors].mean(axis=1)
+        audit_df['Median'] = df[vendors].median(axis=1)
+        audit_df['Std_Dev'] = df[vendors].std(axis=1)
+        
+        # Detection Logic: Flag values > 1.5 Std Dev from Mean
+        def find_outliers(row):
+            outliers = []
+            for v in vendors:
+                # Z-score calculation: (Value - Mean) / StdDev
+                if row['Std_Dev'] > 0:
+                    z_score = abs(row[v] - row['Mean']) / row['Std_Dev']
+                    if z_score > 1.5:
+                        outliers.append(f"{v} (Z:{z_score:.2f})")
+            return ", ".join(outliers) if outliers else "Clean"
 
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
+        audit_df = pd.concat([audit_df, df[vendors]], axis=1)
+        audit_df['Suspect Flags'] = audit_df.apply(find_outliers, axis=1)
+        
+        # Display Anomalies
+        st.subheader("Statistical Outlier Detection")
+        st.info("Flags identify vendors significantly distant (1.5σ+) from the line item average.")
+        st.dataframe(audit_df[[description_col, 'Mean', 'Median', 'Suspect Flags']])
+
+        # Heatmap of Prices
+        st.subheader("Price Intensity Heatmap")
+        fig_heat = px.imshow(df[vendors], y=df[description_col], x=vendors, 
+                             labels=dict(color="Price"),
+                             color_continuous_scale='Viridis')
+        st.plotly_chart(fig_heat, use_container_width=True)
 
 else:
-    st.warning("Please upload a file to begin the analysis.")
+    st.info("Please upload a CSV or Excel file to begin.")
