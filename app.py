@@ -147,4 +147,4 @@ if uploaded_file:
     fig_var.add_hline(y=bid_tab.loc[selected_item, 'Mean'], line_dash="dot", 
                       annotation_text="Market Mean", annotation_position="top left")
     
-    st.plotly_chart(fig) # Correct
+    st.plotly_chart(fig_var, use_container_width=True)
