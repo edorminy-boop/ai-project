@@ -99,7 +99,13 @@ if uploaded_file:
         score_df = pd.DataFrame(scorecard_data).set_index("Bidder").sort_values("Total Bid")
 
         st.write("### Analysis Metrics")
-        st.dataframe(
-            score_df.style.highlight_min(subset=['Total Bid', 'Suspect Outliers'], color='#b7e4c7')
-                        .highlight_max(subset=['Items at Lowest Price'], color='#b7e4c7')
+        st.write("### Detailed Line Item Comparison")
+        
+        # We create the styled object first to avoid syntax nesting errors
+        styled_df = bid_tab.style.highlight_min(subset=vendors, axis=1, color='#b7e4c7') \
+                                .highlight_max(subset=vendors, axis=1, color='#ffccd5') \
+                                .format(subset=['Mean', 'Median', 'Std_Dev'] + vendors, precision=2)
+
+        # Then we pass the styled object to streamlit
+        st.dataframe(styled_df, use_container_width=True)
                         .
