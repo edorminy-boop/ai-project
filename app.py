@@ -1,114 +1,66 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
 
-# Page Config
 st.set_page_config(page_title="AI Bid Analyzer", layout="wide")
 
 st.title("🏗️ AI Bid Tab Analyzer")
-st.markdown("Upload a bid comparison sheet to analyze value, variances, and discrepancies.")
 
-# 1. File Upload
-uploaded_file = st.file_uploader("Upload Bid Tab (CSV or Excel)", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("Upload Bid Tab", type=["csv", "xlsx"])
 
 if uploaded_file:
-    # Load data
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    # 1. Load Data
+    raw_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
     
-    # Identify Vendors (Assumes first 2-3 columns are Description/Qty/Unit)
-    # We identify numeric columns as potential vendor price columns
-    all_cols = df.columns.tolist()
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    # Let user confirm which columns are the Vendors
-    vendors = st.multiselect("Select Vendor Columns", numeric_cols, default=numeric_cols)
-    description_col = st.selectbox("Select Line Item Description Column", all_cols, index=0)
+    # 2. Identify Columns (Dynamically)
+    # User selects which column is which
+    cols = raw_df.columns.tolist()
+    bidder_col = st.selectbox("Which column contains Bidder Names?", cols, index=0)
+    desc_col = st.selectbox("Which column contains Line Item Descriptions?", cols, index=1)
+    price_col = st.selectbox("Which column contains the Unit Price/Total?", cols, index=2)
 
-    if vendors and description_col:
-        # --- SECTION 1: BEST VALUE ANALYSIS ---
+    # 3. PIVOT THE DATA (The Critical Step)
+    # This transforms the data so Bidders are columns and Descriptions are unique rows
+    try:
+        df = raw_df.pivot_table(index=desc_col, columns=bidder_col, values=price_col, aggfunc='first')
+        vendors = df.columns.tolist()
+        
+        st.success(f"Analyzed {len(vendors)} unique bidders across {len(df)} line items.")
+        
+        # --- SECTION 1: BEST VALUE ---
         st.header("1. Overall Bid Summary")
+        totals = df.sum().sort_values()
         
-        totals = df[vendors].sum().sort_values()
-        best_vendor = totals.idxmin()
+        c1, c2 = st.columns([1, 2])
+        c1.metric("Lowest Overall Bidder", totals.idxmin(), f"${totals.min():,.2f}")
+        c1.dataframe(totals.rename("Total").map("${:,.2f}".format))
         
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            st.metric("Best Value (Lowest Total)", best_vendor)
-            st.write("**Total Bid Comparison**")
-            st.dataframe(totals.rename("Total Bid Amount").map("${:,.2f}".format))
-            
-        with col2:
-            fig_total = px.bar(totals, x=totals.index, y=totals.values, 
-                               title="Total Bid Comparison", 
-                               labels={'y':'Total Cost', 'index':'Vendor'},
-                               color=totals.index)
-            st.plotly_chart(fig_total, use_container_width=True)
-
-        st.divider()
+        fig_total = px.bar(totals, x=totals.index, y=totals.values, title="Total Cost Comparison", color=totals.index)
+        c2.plotly_chart(fig_total, use_container_width=True)
 
         # --- SECTION 2: LINE ITEM VARIANCE ---
-        st.header("2. Line Item Detail & Variance")
+        st.header("2. Line Item Audit")
         
-        # Calculate Variance Data
-        detail_df = df[[description_col] + vendors].copy()
-        detail_df['Average'] = detail_df[vendors].mean(axis=1)
+        # Statistical Calculations
+        df['Mean'] = df[vendors].mean(axis=1)
+        df['Median'] = df[vendors].median(axis=1)
+        df['Std_Dev'] = df[vendors].std(axis=1)
         
-        # Display the table with conditional formatting
-        st.write("### Line Item Comparison Table")
-        st.dataframe(detail_df.style.highlight_min(subset=vendors, axis=1, color='lightgreen'))
+        # Flag suspect bids (1.5 Standard Deviations from Mean)
+        def get_flags(row):
+            flags = [v for v in vendors if row['Std_Dev'] > 0 and abs(row[v] - row['Mean']) > (1.5 * row['Std_Dev'])]
+            return ", ".join(flags) if flags else "Consistent"
 
-        # Visualizing variance for a specific item
-        selected_item = st.selectbox("Drill down into specific Line Item:", df[description_col].unique())
-        item_row = detail_df[detail_df[description_col] == selected_item]
+        df['Suspect Bidders'] = df.apply(get_flags, axis=1)
         
-        # Plotly Variance Chart
-        item_vals = item_row[vendors].T
-        item_vals.columns = ['Price']
-        fig_var = px.bar(item_vals, x=item_vals.index, y='Price', 
-                         title=f"Price Spread for: {selected_item}",
-                         color='Price', color_continuous_scale='RdYlGn_r')
-        st.plotly_chart(fig_var, use_container_width=True)
+        st.write("### Data Table (Formatted)")
+        st.dataframe(df.style.highlight_min(subset=vendors, axis=1, color='lightgreen').format(precision=2))
 
-        st.divider()
-
-        # --- SECTION 3: STATISTICAL AUDIT (THE 'AI' LOGIC) ---
-        st.header("3. Suspect Bid & Discrepancy Audit")
-        
-        audit_df = df[[description_col]].copy()
-        audit_df['Mean'] = df[vendors].mean(axis=1)
-        audit_df['Median'] = df[vendors].median(axis=1)
-        audit_df['Std_Dev'] = df[vendors].std(axis=1)
-        
-        # Detection Logic: Flag values > 1.5 Std Dev from Mean
-        def find_outliers(row):
-            outliers = []
-            for v in vendors:
-                # Z-score calculation: (Value - Mean) / StdDev
-                if row['Std_Dev'] > 0:
-                    z_score = abs(row[v] - row['Mean']) / row['Std_Dev']
-                    if z_score > 1.5:
-                        outliers.append(f"{v} (Z:{z_score:.2f})")
-            return ", ".join(outliers) if outliers else "Clean"
-
-        audit_df = pd.concat([audit_df, df[vendors]], axis=1)
-        audit_df['Suspect Flags'] = audit_df.apply(find_outliers, axis=1)
-        
-        # Display Anomalies
-        st.subheader("Statistical Outlier Detection")
-        st.info("Flags identify vendors significantly distant (1.5σ+) from the line item average.")
-        st.dataframe(audit_df[[description_col, 'Mean', 'Median', 'Suspect Flags']])
-
-        # Heatmap of Prices
-        st.subheader("Price Intensity Heatmap")
-        fig_heat = px.imshow(df[vendors], y=df[description_col], x=vendors, 
-                             labels=dict(color="Price"),
-                             color_continuous_scale='Viridis')
+        # Heatmap for visualizing discrepancies
+        st.subheader("Price Variance Heatmap")
+        fig_heat = px.imshow(df[vendors], aspect="auto", color_continuous_scale='Viridis', title="Darker colors indicate higher relative costs")
         st.plotly_chart(fig_heat, use_container_width=True)
 
-else:
-    st.info("Please upload a CSV or Excel file to begin.")
+    except Exception as e:
+        st.error(f"Error pivoting data: {e}. Ensure there are no empty price cells.")
